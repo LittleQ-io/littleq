@@ -159,7 +159,7 @@ func (s *Store) Pop(ctx context.Context, typ, workerID string, caps []string, op
 	}
 
 	sub := s.client.Subscribe(ctx, s.keyNotify(typ))
-	defer sub.Close()
+	defer func() { _ = sub.Close() }()
 	notifyCh := sub.Channel()
 
 	var deadline <-chan time.Time

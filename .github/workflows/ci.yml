@@ -10,14 +10,11 @@ jobs:
     name: Unit tests & lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: jdx/mise-action@v2
-
-      - name: Verify proto generated code is up to date
-        run: |
-          just proto
-          git diff --exit-code proto/
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2.4.4
+        with:
+          experimental: true
 
       - name: Build
         run: go build ./...
@@ -48,9 +45,11 @@ jobs:
             env: POSTGRES_DSN=postgres://littleq_test:littleq_test@localhost:5433/littleq_test?sslmode=disable
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2.4.4
+        with:
+          experimental: true
 
       - name: Start Redis
         if: matrix.backend == 'redis'

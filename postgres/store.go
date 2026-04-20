@@ -78,25 +78,26 @@ func (s *Store) Push(ctx context.Context, entry lq.RawTaskEntry[json.RawMessage]
 			type, payload, capabilities, priority, eff_priority,
 			policy_name, policy_max_wait, policy_alpha, policy_retries, policy_scaling,
 			schema_version, dedup_key, source_id, max_retries
-		) VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (type, dedup_key) WHERE dedup_key != '' DO NOTHING
 		RETURNING id`, s.opts.table)
 
 	var id int64
 	err = s.db.QueryRowContext(ctx, q,
-		entry.Type,
-		payload,
-		pq.Array(nonNilSlice(entry.Capabilities)),
-		entry.Priority,
-		entry.Policy.Name,
-		entry.Policy.MaxWait.Nanoseconds(),
-		entry.Policy.AgingAlpha,
-		entry.Policy.MaxRetries,
-		int8(entry.Policy.ScalingMode),
-		entry.SchemaVersion,
-		entry.DedupKey,
-		entry.SourceID,
-		entry.MaxRetries,
+		entry.Type,                                // $1
+		payload,                                   // $2
+		pq.Array(nonNilSlice(entry.Capabilities)), // $3
+		entry.Priority,                            // $4 priority (int)
+		float64(entry.Priority),                   // $5 eff_priority (float8)
+		entry.Policy.Name,                         // $6
+		entry.Policy.MaxWait.Nanoseconds(),        // $7
+		entry.Policy.AgingAlpha,                   // $8
+		entry.Policy.MaxRetries,                   // $9
+		int8(entry.Policy.ScalingMode),            // $10
+		entry.SchemaVersion,                       // $11
+		entry.DedupKey,                            // $12
+		entry.SourceID,                            // $13
+		entry.MaxRetries,                          // $14
 	).Scan(&id)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -137,7 +138,7 @@ func (s *Store) Pop(ctx context.Context, typ, workerID string, caps []string, op
 	// Set up LISTEN on a dedicated connection.
 	listener := pq.NewListener(s.dsn, 100*time.Millisecond, time.Minute,
 		func(_ pq.ListenerEventType, _ error) {})
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	if err := listener.Listen(notifyChannel); err != nil {
 		// Fallback to polling if LISTEN fails (e.g. no network).
 		listener = nil
@@ -324,7 +325,7 @@ func (s *Store) Fail(ctx context.Context, _ string, taskID int64, workerID strin
 	if err != nil {
 		return fmt.Errorf("littleq/postgres: fail begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var retryCount, maxRetries, priority int
 	err = tx.QueryRowContext(ctx,

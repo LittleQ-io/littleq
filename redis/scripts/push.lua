@@ -24,7 +24,7 @@ local alpha     = ARGV[6]
 if dedup_key ~= "" then
     local existing = redis.call("HGET", KEYS[3], dedup_key)
     if existing then
-        return {0, existing}  -- 0 = duplicate, existing id
+        return {"0", existing}  -- "0" = duplicate, existing id
     end
 end
 
@@ -48,4 +48,4 @@ redis.call("HSET", KEYS[5],
     "created_at", ts,
     "alpha",      alpha)
 
-return {1, id}  -- 1 = success, new id
+return {"1", id}  -- "1" = success, new id
