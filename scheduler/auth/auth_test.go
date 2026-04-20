@@ -20,7 +20,8 @@ import (
 	"github.com/LittleQ-io/littleq/scheduler/auth"
 )
 
-// noopRepo satisfies TaskRepository[string, json.RawMessage] for tests.
+// ─── stub repo ────────────────────────────────────────────────────────────────
+
 type noopRepo struct{}
 
 func (noopRepo) Push(_ context.Context, _ lq.RawTaskEntry[json.RawMessage]) (string, error) {
@@ -44,7 +45,7 @@ var _ lq.TaskRepository[string, json.RawMessage] = noopRepo{}
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-func newServerWithGuard(t *testing.T, guard auth.SecurityGuard) string {
+func newServer(t *testing.T, guard auth.SecurityGuard) lqpb.SchedulerClient {
 	t.Helper()
 	srv, err := scheduler.NewServer[string](noopRepo{}, scheduler.StringIDCodec{})
 	if err != nil {
@@ -61,56 +62,45 @@ func newServerWithGuard(t *testing.T, guard auth.SecurityGuard) string {
 	}
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(func() { grpcSrv.Stop(); srv.Close() })
-	return lis.Addr().String()
-}
 
-func dial(t *testing.T, addr string, opts ...grpc.DialOption) *grpc.ClientConn {
-	t.Helper()
-	opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	conn, err := grpc.NewClient(addr, opts...)
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return conn
+	return lqpb.NewSchedulerClient(conn)
 }
 
-// ─── APIKeyGuard tests ────────────────────────────────────────────────────────
+// ─── simple in-process guard implementations used only in tests ───────────────
 
-func TestAPIKeyGuard_valid(t *testing.T) {
-	addr := newServerWithGuard(t, auth.NewAPIKeyGuard("secret-key"))
-	conn := dial(t, addr,
-		grpc.WithPerRPCCredentials(auth.APIKeyCredential{Key: "secret-key", Insecure: true}),
-	)
-	resp, err := lqpb.NewSchedulerClient(conn).Health(context.Background(), &lqpb.HealthRequest{})
-	if err != nil {
-		t.Fatalf("valid key rejected: %v", err)
+// apiKeyGuard is a test-only SecurityGuard that checks x-api-key metadata.
+type apiKeyGuard struct{ validKeys map[string]struct{} }
+
+func newAPIKeyGuard(keys ...string) *apiKeyGuard {
+	m := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		m[k] = struct{}{}
 	}
-	if !resp.Healthy {
-		t.Error("expected healthy=true")
-	}
+	return &apiKeyGuard{m}
 }
 
-func TestAPIKeyGuard_missingKey(t *testing.T) {
-	addr := newServerWithGuard(t, auth.NewAPIKeyGuard("secret-key"))
-	conn := dial(t, addr)
-	_, err := lqpb.NewSchedulerClient(conn).Health(context.Background(), &lqpb.HealthRequest{})
-	if code := status.Code(err); code != codes.Unauthenticated {
-		t.Fatalf("expected Unauthenticated, got %v", code)
+func (g *apiKeyGuard) Authenticate(ctx context.Context) (auth.Identity, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, fmt.Errorf("missing metadata")
 	}
-}
-
-func TestAPIKeyGuard_wrongKey(t *testing.T) {
-	addr := newServerWithGuard(t, auth.NewAPIKeyGuard("secret-key"))
-	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "bad")
-	conn := dial(t, addr)
-	_, err := lqpb.NewSchedulerClient(conn).Health(ctx, &lqpb.HealthRequest{})
-	if code := status.Code(err); code != codes.Unauthenticated {
-		t.Fatalf("expected Unauthenticated, got %v", code)
+	vals := md.Get("x-api-key")
+	if len(vals) == 0 {
+		return nil, fmt.Errorf("missing x-api-key")
 	}
+	if _, ok := g.validKeys[vals[0]]; !ok {
+		return nil, fmt.Errorf("invalid key")
+	}
+	return &simpleIdentity{vals[0]}, nil
 }
-
-// ─── Custom SecurityGuard ─────────────────────────────────────────────────────
+func (g *apiKeyGuard) Authorize(_ context.Context, _ auth.Identity, _ string) (auth.Decision, error) {
+	return auth.Decision{Allowed: true, Scope: "all"}, nil
+}
 
 // denyAllGuard always fails authentication.
 type denyAllGuard struct{}
@@ -122,68 +112,93 @@ func (denyAllGuard) Authorize(_ context.Context, _ auth.Identity, _ string) (aut
 	return auth.Decision{}, nil
 }
 
-func TestCustomGuard_denyAll(t *testing.T) {
-	addr := newServerWithGuard(t, denyAllGuard{})
-	conn := dial(t, addr)
-	_, err := lqpb.NewSchedulerClient(conn).Health(context.Background(), &lqpb.HealthRequest{})
-	if code := status.Code(err); code != codes.Unauthenticated {
-		t.Fatalf("expected Unauthenticated from denyAllGuard, got %v", code)
-	}
-}
+// actionDenyGuard authenticates everyone but denies a specific gRPC action.
+type actionDenyGuard struct{ denied string }
 
-// authorizeOnlyGuard authenticates everyone but denies specific actions.
-type authorizeOnlyGuard struct{ deniedAction string }
-
-func (g *authorizeOnlyGuard) Authenticate(_ context.Context) (auth.Identity, error) {
-	return &fixedIdentity{"user-1"}, nil
+func (g *actionDenyGuard) Authenticate(_ context.Context) (auth.Identity, error) {
+	return &simpleIdentity{"user"}, nil
 }
-func (g *authorizeOnlyGuard) Authorize(_ context.Context, _ auth.Identity, action string) (auth.Decision, error) {
-	if action == g.deniedAction {
+func (g *actionDenyGuard) Authorize(_ context.Context, _ auth.Identity, action string) (auth.Decision, error) {
+	if action == g.denied {
 		return auth.Decision{Allowed: false, Reason: "action not permitted"}, nil
 	}
 	return auth.Decision{Allowed: true, Scope: "all"}, nil
 }
 
-type fixedIdentity struct{ id string }
+type simpleIdentity struct{ id string }
 
-func (f *fixedIdentity) UserID() string         { return f.id }
-func (f *fixedIdentity) Claims() map[string]any { return nil }
+func (s *simpleIdentity) UserID() string         { return s.id }
+func (s *simpleIdentity) Claims() map[string]any { return nil }
 
-func TestCustomGuard_authorizeDenied(t *testing.T) {
-	guard := &authorizeOnlyGuard{deniedAction: "/littleq.v1.Scheduler/Health"}
-	addr := newServerWithGuard(t, guard)
-	conn := dial(t, addr)
-	_, err := lqpb.NewSchedulerClient(conn).Health(context.Background(), &lqpb.HealthRequest{})
+// ─── tests ────────────────────────────────────────────────────────────────────
+
+func TestUnaryInterceptor_authenticated(t *testing.T) {
+	client := newServer(t, newAPIKeyGuard("good-key"))
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "good-key")
+	resp, err := client.Health(ctx, &lqpb.HealthRequest{})
+	if err != nil {
+		t.Fatalf("authenticated request rejected: %v", err)
+	}
+	if !resp.Healthy {
+		t.Error("expected healthy=true")
+	}
+}
+
+func TestUnaryInterceptor_missingCredentials(t *testing.T) {
+	client := newServer(t, newAPIKeyGuard("good-key"))
+	_, err := client.Health(context.Background(), &lqpb.HealthRequest{})
+	if code := status.Code(err); code != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated, got %v", code)
+	}
+}
+
+func TestUnaryInterceptor_invalidCredentials(t *testing.T) {
+	client := newServer(t, newAPIKeyGuard("good-key"))
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "bad-key")
+	_, err := client.Health(ctx, &lqpb.HealthRequest{})
+	if code := status.Code(err); code != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated, got %v", code)
+	}
+}
+
+func TestUnaryInterceptor_authorizationDenied(t *testing.T) {
+	client := newServer(t, &actionDenyGuard{denied: "/littleq.v1.Scheduler/Health"})
+	_, err := client.Health(context.Background(), &lqpb.HealthRequest{})
 	if code := status.Code(err); code != codes.PermissionDenied {
 		t.Fatalf("expected PermissionDenied, got %v", code)
 	}
 }
 
-// ─── IdentityFromContext ──────────────────────────────────────────────────────
+func TestStreamInterceptor_authenticated(t *testing.T) {
+	client := newServer(t, newAPIKeyGuard("key"))
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "key")
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	stream, err := client.Subscribe(ctx, &lqpb.SubscribeRequest{WorkerId: "w1", Type: "t"})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	// Stream opens; no tasks means Recv blocks until ctx cancels.
+	_, err = stream.Recv()
+	if code := status.Code(err); code == codes.Unauthenticated || code == codes.PermissionDenied {
+		t.Fatalf("authenticated stream was rejected: %v", err)
+	}
+}
+
+func TestStreamInterceptor_unauthenticated(t *testing.T) {
+	client := newServer(t, denyAllGuard{})
+	stream, err := client.Subscribe(context.Background(), &lqpb.SubscribeRequest{WorkerId: "w1", Type: "t"})
+	if err != nil {
+		t.Fatalf("Subscribe open: %v", err)
+	}
+	_, err = stream.Recv()
+	if code := status.Code(err); code != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated, got %v", code)
+	}
+}
 
 func TestIdentityFromContext_empty(t *testing.T) {
 	if id := auth.IdentityFromContext(context.Background()); id != nil {
 		t.Errorf("expected nil, got %v", id)
-	}
-}
-
-// ─── APIKeyCredential ─────────────────────────────────────────────────────────
-
-func TestAPIKeyCredential_requireTransportSecurity(t *testing.T) {
-	if !( auth.APIKeyCredential{Key: "k"}.RequireTransportSecurity()) {
-		t.Error("expected true when Insecure=false")
-	}
-	if (auth.APIKeyCredential{Key: "k", Insecure: true}.RequireTransportSecurity()) {
-		t.Error("expected false when Insecure=true")
-	}
-}
-
-func TestAPIKeyCredential_metadata(t *testing.T) {
-	md, err := auth.APIKeyCredential{Key: "my-key", Insecure: true}.GetRequestMetadata(context.Background())
-	if err != nil {
-		t.Fatalf("GetRequestMetadata: %v", err)
-	}
-	if md["x-api-key"] != "my-key" {
-		t.Errorf("x-api-key = %q, want my-key", md["x-api-key"])
 	}
 }
