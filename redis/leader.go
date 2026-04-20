@@ -25,16 +25,16 @@ func (s *Store) Campaign(ctx context.Context) error {
 	key := s.opts.leaderKey
 
 	for {
-		ok, err := s.client.SetNX(ctx, key, nodeID, ttl).Result()
-		if err != nil {
-			return fmt.Errorf("littleq/redis: campaign: %w", err)
+		setErr := s.client.SetArgs(ctx, key, nodeID, rdb.SetArgs{TTL: ttl, Mode: "NX"}).Err()
+		if setErr != nil && setErr != rdb.Nil {
+			return fmt.Errorf("littleq/redis: campaign: %w", setErr)
 		}
-		if ok {
+		if setErr == nil {
 			s.leaderID.Store(&nodeID)
 			go s.refreshLease(ctx, key, nodeID, ttl, refresh)
 			return nil
 		}
-		// Wait before retrying.
+		// Key exists (setErr == rdb.Nil), wait before retrying.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
