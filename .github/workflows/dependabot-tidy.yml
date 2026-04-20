@@ -1,0 +1,47 @@
+name: Dependabot Tidy
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  tidy:
+    name: Go Mod Tidy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: jdx/mise-action@eb2f5cb7ab4d254bd6e3bd63e35b13a5e3fc3b2a # v2.2.3
+        with:
+          experimental: true
+
+      - name: Run go mod tidy
+        run: go mod tidy
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit changes
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add go.mod go.sum
+          git commit -m "chore: go mod tidy"
+          git push

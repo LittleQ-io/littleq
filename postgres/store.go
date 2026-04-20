@@ -138,7 +138,7 @@ func (s *Store) Pop(ctx context.Context, typ, workerID string, caps []string, op
 	// Set up LISTEN on a dedicated connection.
 	listener := pq.NewListener(s.dsn, 100*time.Millisecond, time.Minute,
 		func(_ pq.ListenerEventType, _ error) {})
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	if err := listener.Listen(notifyChannel); err != nil {
 		// Fallback to polling if LISTEN fails (e.g. no network).
 		listener = nil
@@ -325,7 +325,7 @@ func (s *Store) Fail(ctx context.Context, _ string, taskID int64, workerID strin
 	if err != nil {
 		return fmt.Errorf("littleq/postgres: fail begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var retryCount, maxRetries, priority int
 	err = tx.QueryRowContext(ctx,
