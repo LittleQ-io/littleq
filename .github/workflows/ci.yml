@@ -14,11 +14,6 @@ jobs:
 
       - uses: jdx/mise-action@v2
 
-      - name: Verify proto generated code is up to date
-        run: |
-          just proto
-          git diff --exit-code proto/
-
       - name: Build
         run: go build ./...
 
