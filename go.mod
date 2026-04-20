@@ -1,6 +1,6 @@
 module github.com/LittleQ-io/littleq
 
-go 1.25.0
+go 1.25.9
 
 require (
 	github.com/lib/pq v1.12.3
