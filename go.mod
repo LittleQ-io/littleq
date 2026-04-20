@@ -4,7 +4,7 @@ go 1.25
 
 require (
 	github.com/lib/pq v1.12.3
-	github.com/redis/go-redis/v9 v9.7.0
+	github.com/redis/go-redis/v9 v9.7.3
 	go.mongodb.org/mongo-driver/v2 v2.5.1
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
