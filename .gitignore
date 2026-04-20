@@ -1,0 +1,19 @@
+# Binaries
+bin/
+*.exe
+*.test
+
+# Go workspace
+vendor/
+
+# Test coverage
+*.out
+*.prof
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

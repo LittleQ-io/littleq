@@ -1,0 +1,171 @@
+syntax = "proto3";
+
+package littleq.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/LittleQ-io/littleq/proto/littleq/v1;lqpb";
+
+// Scheduler is the central gRPC service that workers and producers talk to.
+service Scheduler {
+  // Enqueue pushes a new task into the queue.
+  rpc Enqueue(EnqueueRequest) returns (EnqueueResponse);
+
+  // Subscribe opens a server-streaming connection. The server dispatches tasks
+  // to the worker as they become available. The stream ends when the client
+  // disconnects or the server shuts down.
+  rpc Subscribe(SubscribeRequest) returns (stream TaskAssignment);
+
+  // Heartbeat refreshes a worker's lease on a claimed task.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Complete marks a task as successfully finished.
+  rpc Complete(CompleteRequest) returns (CompleteResponse);
+
+  // Fail marks a task as failed; the backend re-enqueues or marks dead.
+  rpc Fail(FailRequest) returns (FailResponse);
+
+  // ScalingEvents is a server-streaming RPC that periodically emits worker
+  // count recommendations derived from Little's Law.
+  rpc ScalingEvents(ScalingEventsRequest) returns (stream ScalingEvent);
+
+  // GetMetrics returns queue depth and throughput measurements.
+  rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+
+  // Health returns the backend liveness status.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// ─── Enqueue ──────────────────────────────────────────────────────────────────
+
+message EnqueueRequest {
+  string type            = 1;
+  bytes  payload         = 2; // JSON-encoded domain payload
+  repeated string capabilities = 3;
+  int32  priority        = 4;
+  Policy policy          = 5;
+  int32  schema_version  = 6;
+  string dedup_key       = 7;
+  string source_id       = 8;
+  int32  max_retries     = 9;
+}
+
+message EnqueueResponse {
+  string task_id   = 1;
+  bool   duplicate = 2; // true when dedup_key matched an existing task
+}
+
+// ─── Subscribe ────────────────────────────────────────────────────────────────
+
+message SubscribeRequest {
+  string worker_id             = 1;
+  string type                  = 2;
+  repeated string capabilities = 3;
+  // pop_timeout controls how long Pop blocks per attempt before retrying.
+  // Defaults to 5 s when zero.
+  google.protobuf.Duration pop_timeout = 4;
+}
+
+message TaskAssignment {
+  string task_id               = 1;
+  string type                  = 2;
+  bytes  payload               = 3;
+  repeated string capabilities = 4;
+  int32  priority              = 5;
+  Policy policy                = 6;
+  int32  schema_version        = 7;
+  int32  retry_count           = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp claimed_at = 10;
+}
+
+// ─── Heartbeat ────────────────────────────────────────────────────────────────
+
+message HeartbeatRequest {
+  string type      = 1;
+  string task_id   = 2;
+  string worker_id = 3;
+}
+
+message HeartbeatResponse {}
+
+// ─── Complete ─────────────────────────────────────────────────────────────────
+
+message CompleteRequest {
+  string type      = 1;
+  string task_id   = 2;
+  string worker_id = 3;
+}
+
+message CompleteResponse {}
+
+// ─── Fail ─────────────────────────────────────────────────────────────────────
+
+message FailRequest {
+  string type      = 1;
+  string task_id   = 2;
+  string worker_id = 3;
+  string reason    = 4;
+}
+
+message FailResponse {}
+
+// ─── ScalingEvents ────────────────────────────────────────────────────────────
+
+message ScalingEventsRequest {
+  string type = 1;
+  // interval between successive recommendations. Defaults to 30 s when zero.
+  google.protobuf.Duration interval = 2;
+}
+
+message ScalingEvent {
+  string type                       = 1;
+  int32  recommended_workers        = 2;
+  double arrival_rate               = 3; // λ — tasks/second
+  double service_rate               = 4; // μ — tasks/second
+  int64  queue_depth                = 5;
+  ScalingMode scaling_mode          = 6;
+  google.protobuf.Timestamp ts      = 7;
+}
+
+// ─── Metrics ──────────────────────────────────────────────────────────────────
+
+message MetricsRequest {
+  string type                    = 1;
+  google.protobuf.Duration window = 2; // sampling window; defaults to 60 s
+}
+
+message MetricsResponse {
+  string type         = 1;
+  double arrival_rate = 2;
+  double service_rate = 3;
+  int64  queue_depth  = 4;
+  double avg_wait     = 5; // seconds
+}
+
+// ─── Health ───────────────────────────────────────────────────────────────────
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool   healthy = 1;
+  string message = 2;
+}
+
+// ─── Shared types ─────────────────────────────────────────────────────────────
+
+message Policy {
+  string name                     = 1;
+  google.protobuf.Duration max_wait = 2;
+  double aging_alpha              = 3;
+  int32  max_retries              = 4;
+  ScalingMode scaling_mode        = 5;
+}
+
+enum ScalingMode {
+  SCALING_MODE_UNSPECIFIED = 0;
+  SCALING_MODE_AGGRESSIVE  = 1;
+  SCALING_MODE_BALANCED    = 2;
+  SCALING_MODE_ECONOMIC    = 3;
+}

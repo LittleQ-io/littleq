@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Unit tests & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Verify proto generated code is up to date
+        run: |
+          just proto
+          git diff --exit-code proto/
+
+      - name: Build
+        run: go build ./...
+
+      - name: Unit tests
+        run: go test -race ./...
+
+      - name: Lint
+        run: golangci-lint run
+
+  integration:
+    name: Integration tests (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: redis
+            pkg: ./redis/...
+            env: REDIS_URL=redis://localhost:6399
+
+          - backend: mongo
+            pkg: ./mongo/...
+            env: MONGO_URI=mongodb://localhost:27019/?directConnection=true
+
+          - backend: postgres
+            pkg: ./postgres/...
+            env: POSTGRES_DSN=postgres://littleq_test:littleq_test@localhost:5433/littleq_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Start Redis
+        if: matrix.backend == 'redis'
+        run: |
+          docker run -d --name lq-redis -p 6399:6379 redis:7-alpine
+          until docker exec lq-redis redis-cli ping 2>/dev/null | grep -q PONG; do sleep 0.3; done
+          echo "Redis ready"
+
+      - name: Start MongoDB replica set
+        if: matrix.backend == 'mongo'
+        run: |
+          docker run -d --name lq-mongo -p 27019:27017 mongo:7.0 --replSet rs0
+          echo "Waiting for MongoDB..."
+          for i in $(seq 1 30); do
+            docker exec lq-mongo mongosh --quiet --eval "db.adminCommand('ping').ok" 2>/dev/null | grep -q "1" && break
+            sleep 1
+          done
+          echo "Initiating replica set..."
+          docker exec lq-mongo mongosh --quiet --eval \
+            "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
+          echo "Waiting for primary..."
+          for i in $(seq 1 30); do
+            docker exec lq-mongo mongosh --quiet --eval "rs.isMaster().ismaster" 2>/dev/null | grep -q "true" && break
+            sleep 1
+          done
+          echo "MongoDB replica set ready"
+
+      - name: Start PostgreSQL
+        if: matrix.backend == 'postgres'
+        run: |
+          docker run -d --name lq-pg -p 5433:5432 \
+            -e POSTGRES_USER=littleq_test \
+            -e POSTGRES_PASSWORD=littleq_test \
+            -e POSTGRES_DB=littleq_test \
+            postgres:16-alpine
+          for i in $(seq 1 30); do
+            docker exec lq-pg pg_isready -U littleq_test > /dev/null 2>&1 && break
+            sleep 1
+          done
+          echo "PostgreSQL ready"
+
+      - name: Integration tests
+        env:
+          REDIS_URL: redis://localhost:6399
+          MONGO_URI: mongodb://localhost:27019/?directConnection=true
+          POSTGRES_DSN: postgres://littleq_test:littleq_test@localhost:5433/littleq_test?sslmode=disable
+        run: go test -v -race -count=1 -tags integration ${{ matrix.pkg }}
